@@ -24,9 +24,6 @@ const CLIENT_ID = "1505180304057569401";
 const GUILD_ID = "1500881333348470846";
 const CHANNEL_ID = "1505181511010488420";
 
-const WARNING_LIMIT = 5;
-const TIMEOUT_HOURS = 2;
-
 const MONEY_FILE = './money.json';
 if (!fs.existsSync(MONEY_FILE)) {
   fs.writeFileSync(MONEY_FILE, JSON.stringify({}));
@@ -71,8 +68,20 @@ const dealerReplies = [
   "en luottais toho"
 ];
 
+const kumpiQuestions = [
+  { question: "kumpi: varastettu puhelin vai varastettu lompakko? 👀", a: "puhelin", b: "lompakko" },
+  { question: "kumpi: mystinen paketti vai suljettu laukku? 🎒", a: "paketti", b: "laukku" },
+  { question: "kumpi: varastettu auto vai varastettu mopo? 🚗", a: "auto", b: "mopo" },
+  { question: "kumpi: pimeä diili nyt vai odottaa huomiseen? ⏰", a: "nyt", b: "huominen" },
+  { question: "kumpi: pieni paketti monella rahalla vai iso paketti vähällä rahalla? 📦", a: "pieni", b: "iso" },
+  { question: "kumpi: tuntematon mies kadulla vai tuttu jälleenmyyjä? 🕵️", a: "tuntematon", b: "tuttu" },
+  { question: "kumpi: nopea keikka vai turvallinen keikka? 💼", a: "nopea", b: "turvallinen" }
+];
+
+const activeKumpi = new Map();
 const userMessages = new Map();
-const warnedUsers = new Set();
+const warnedUsers = new Map();
+// 0 = ei varoitettu, 1 = 2h timeout saatu, 2 = 24h timeout saatu
 
 const commands = [
   new SlashCommandBuilder().setName('balance').setDescription('Näyttää sinun pankkitilin saldon'),
@@ -84,7 +93,6 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
   try {
-    console.log('Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('Slash commands registered.');
   } catch (error) {
@@ -102,6 +110,27 @@ client.on('messageCreate', async (message) => {
 
   const content = message.content.toLowerCase();
 
+  // KUMPI VASTAUS
+  if (activeKumpi.has(message.author.id)) {
+    const kumpi = activeKumpi.get(message.author.id);
+    const answer = content.trim();
+
+    if (answer === kumpi.a || answer === kumpi.b) {
+      activeKumpi.delete(message.author.id);
+      const isGood = Math.random() > 0.5;
+      const amount = isGood
+        ? Math.floor(Math.random() * 800) + 400
+        : Math.floor(Math.random() * 200) + 50;
+      addMoney(message.author.id, amount);
+      if (isGood) {
+        return message.reply(`hyvä valinta 😏 dealer on tyytyväinen\n💸 sait **${amount}€**`);
+      } else {
+        return message.reply(`hmm... olisit voinu valita paremmin 😬\nsait vaan **${amount}€**`);
+      }
+    }
+  }
+
+  // RANDOM MONEY
   const randomMoneyChance = Math.floor(Math.random() * 80);
   if (randomMoneyChance === 7) {
     const amount = Math.floor(Math.random() * 500) + 100;
@@ -109,6 +138,15 @@ client.on('messageCreate', async (message) => {
     message.reply(`löysin vähä ylimäärästä rahaa 💸 (+${amount}€)`);
   }
 
+  // KUMPI KYSYMYS SATUNNAISESTI
+  const kumpiChance = Math.floor(Math.random() * 10);
+  if (kumpiChance === 3 && !activeKumpi.has(message.author.id)) {
+    const q = kumpiQuestions[Math.floor(Math.random() * kumpiQuestions.length)];
+    activeKumpi.set(message.author.id, q);
+    return message.reply(`psst... ${q.question}\nkirjoita **${q.a}** tai **${q.b}**`);
+  }
+
+  // SPAM DETECTION
   if (content.includes("ostaks") || content.includes("kumpi") || content.includes("deal") || content.includes("trade") || content.includes("w/l")) {
     const now = Date.now();
     if (!userMessages.has(message.author.id)) userMessages.set(message.author.id, []);
@@ -117,21 +155,39 @@ client.on('messageCreate', async (message) => {
     const filtered = timestamps.filter(t => now - t < 20000);
     userMessages.set(message.author.id, filtered);
 
-    if (filtered.length >= WARNING_LIMIT && !warnedUsers.has(message.author.id)) {
-      warnedUsers.add(message.author.id);
-      return message.reply("älä spämmää koko ajan 😭 ole kärsivällinen");
-    }
+    const warnLevel = warnedUsers.get(message.author.id) || 0;
 
-    if (filtered.length >= WARNING_LIMIT + 3 && warnedUsers.has(message.author.id)) {
+    // ENSIMMÄINEN VAROITUS
+    if (filtered.length >= 5 && warnLevel === 0) {
+      warnedUsers.set(message.author.id, 1);
       try {
         const member = await message.guild.members.fetch(message.author.id);
-        await member.timeout(TIMEOUT_HOURS * 60 * 60 * 1000, "Dealer spam");
-        warnedUsers.delete(message.author.id);
-        return message.reply(`sait ${TIMEOUT_HOURS}h jäähyn spämmäämisestä 💀`);
+        await member.timeout(2 * 60 * 60 * 1000, "Dealer spam - 1. timeout");
+        return message.reply("älä spämmää 😭 sait **2h jäähyn**. jatka niin tulee pahempaa 👀");
+      } catch (err) { console.log(err); }
+    }
+
+    // TOINEN VAROITUS
+    else if (filtered.length >= 5 && warnLevel === 1) {
+      warnedUsers.set(message.author.id, 2);
+      try {
+        const member = await message.guild.members.fetch(message.author.id);
+        await member.timeout(24 * 60 * 60 * 1000, "Dealer spam - 2. timeout");
+        return message.reply("varoitettiin kerran jo 💀 sait **24h jäähyn**. seuraava on ban 🚨");
+      } catch (err) { console.log(err); }
+    }
+
+    // BAN
+    else if (filtered.length >= 5 && warnLevel === 2) {
+      try {
+        const member = await message.guild.members.fetch(message.author.id);
+        await message.reply("game over 🚨 **banned**");
+        await member.ban({ reason: "Dealer spam - pysyvä ban" });
       } catch (err) { console.log(err); }
     }
   }
 
+  // RANDOM DEALER REPLY
   const randomReplyChance = Math.floor(Math.random() * 7);
   if (randomReplyChance === 1) {
     const reply = dealerReplies[Math.floor(Math.random() * dealerReplies.length)];
